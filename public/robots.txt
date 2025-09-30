@@ -1,0 +1,26 @@
+User-agent: *
+Allow: /
+
+User-agent: *
+Disallow: /admin/
+Disallow: /assets/
+Disallow: /css/
+Disallow: /js/
+Disallow: /vendor/
+Disallow: /main.php
+Disallow: /index.php
+Disallow: /mix-manifest.json
+Disallow: /*?display=*
+Disallow: /locale/es_DO
+Disallow: /auth/connect/facebook
+Disallow: /auth/connect/linkedin
+Disallow: /auth/connect/twitter
+Disallow: /auth/connect/google
+
+
+Sitemap: https://econowisp.com/co/sitemaps.xml
+Sitemap: https://econowisp.com/cr/sitemaps.xml
+Sitemap: https://econowisp.com/cu/sitemaps.xml
+Sitemap: https://econowisp.com/mx/sitemaps.xml
+Sitemap: https://econowisp.com/do/sitemaps.xml
+Sitemap: https://econowisp.com/ve/sitemaps.xml

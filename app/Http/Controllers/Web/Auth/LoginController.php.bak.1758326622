@@ -1,0 +1,148 @@
+<?php
+
+namespace App\Http\Controllers\Web\Auth;
+
+use App\Helpers\Common\JsonUtils;
+use App\Http\Controllers\Web\Auth\Traits\Custom\CreateLoginSession;
+use App\Http\Controllers\Web\Front\FrontController;
+use App\Services\Auth\App\Http\Requests\LoginRequest;
+use App\Services\Auth\LoginService;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Larapen\LaravelMetaTags\Facades\MetaTag;
+
+class LoginController extends FrontController
+{
+    use CreateLoginSession;
+
+    protected LoginService $loginService;
+    protected string $loginUrl;
+    protected string $redirectTo;
+
+    public function __construct(LoginService $loginService)
+    {
+        parent::__construct();
+
+        $this->loginService = $loginService;
+
+        $isUrlFromAdminArea = str_contains(url()->previous(), urlGen()->adminUrl());
+        $this->loginUrl   = urlGen()->signIn();
+        $this->redirectTo = $isUrlFromAdminArea ? urlGen()->adminUrl() : urlGen()->accountOverview();
+    }
+
+    public function showForm(): View|RedirectResponse
+    {
+        if (auth()->viaRemember()) {
+            return redirect()->intended($this->redirectTo);
+        }
+
+        if (!session()->has('flash_notification') && session()->has('resendVerificationData')) {
+            $resendVerificationData = JsonUtils::jsonToArray(session('resendVerificationData'));
+            $isErrorOccurred  = data_get($resendVerificationData, 'isErrorOccurred');
+            $field            = data_get($resendVerificationData, 'field');
+            $fieldHiddenValue = data_get($resendVerificationData, 'fieldHiddenValue');
+
+            $message = ($field == 'phone')
+                ? trans('auth.verification_code_sent', ['fieldHiddenValue' => $fieldHiddenValue])
+                : trans('auth.verification_link_sent', ['fieldHiddenValue' => $fieldHiddenValue]);
+
+            $isErrorOccurred ? flash($message)->error() : flash($message)->info();
+        }
+
+        $coverTitle       = trans('auth.login_cover_title');
+        $coverDescription = trans('auth.login_cover_description');
+
+        [$title, $description, $keywords] = getMetaTag('login');
+        MetaTag::set('title', $title);
+        MetaTag::set('description', strip_tags($description));
+        MetaTag::set('keywords', $keywords);
+
+        return view('auth.login.index', compact('coverTitle', 'coverDescription'));
+    }
+
+   public function postForm(\App\Services\Auth\App\Http\Requests\LoginRequest $request): \Illuminate\Http\RedirectResponse
+{
+    // Login con tu servicio
+    $data    = getServiceData($this->loginService->login($request));
+    $success = data_get($data, 'success');
+
+    if ($success) {
+        $user            = data_get($data, 'result');
+        $userId          = data_get($user, 'id');
+        $userPhone       = data_get($user, 'phone');
+        $userPhoneCc     = data_get($user, 'phone_country');
+        $phoneVerifiedAt = data_get($user, 'phone_verified_at');
+
+        // Si tiene teléfono y NO está verificado -> enviar OTP y redirigir a /auth/verify/users/phone
+        if (!empty($userId) && !empty($userPhone) && empty($phoneVerifiedAt)) {
+            // Mantén sesión ligera como haces en tu flujo
+            $authToken = data_get($data, 'extra.authToken');
+            if (auth()->loginUsingId($userId)) {
+                if (!empty($authToken)) {
+                    session()->put('authToken', $authToken);
+                }
+            }
+
+            // Número en E.164 si tienes helper, si no, usa tal cual
+            $to = function_exists('phoneE164') ? phoneE164($userPhone, $userPhoneCc) : $userPhone;
+
+            try {
+                // Enviar código con Twilio Verify
+                $client = new \Twilio\Rest\Client(env('TWILIO_ACCOUNT_SID'), env('TWILIO_AUTH_TOKEN'));
+                $verify = $client->verify->v2
+                    ->services(env('TWILIO_VERIFY_SERVICE_SID'))
+                    ->verifications
+                    ->create($to, 'sms');
+            } catch (\Throwable $e) {
+                // Si falla el envío del OTP, sigue el login normal
+                flash($e->getMessage() ?: t('unknown_error'))->error();
+                return $this->createNewSession($data);
+            }
+
+            // Enmascarado para mostrar
+            $masked = $to;
+            if (preg_match('/^\+?\d+$/', $to)) {
+                $masked = preg_replace('/\d(?=\d{3})/', '*', $to);
+            }
+
+            // Variables que ya usa tu vista de verificación
+            session()->put('twilioVerify', [
+                'to'   => $verify->to ?? $to,
+                'sid'  => $verify->sid ?? null,
+                'when' => now()->toIso8601String(),
+            ]);
+            session()->put('resendPhoneVerificationData', collect([
+                'field'             => 'phone',
+                'fieldHiddenValue'  => $masked,
+                'isUnverifiedField' => true,
+                'resendLocked'      => false,
+            ])->toJson());
+            session()->put('resendVerificationData', collect([
+                'field'            => 'phone',
+                'fieldHiddenValue' => $masked,
+            ])->toJson());
+            session()->put('authFieldValue', $masked);
+
+            // Para verificar sin volver al login
+            session()->put('verificationUserId', $userId);
+            session()->put('twoFactorUserId', $userId);
+            session()->put('twoFactorMethodValue', $to);
+
+            // Destino después de verificar
+            session()->put('userNextUrl', urlGen()->accountOverview());
+
+            flash(trans('auth.verification_code_sent', ['fieldHiddenValue' => $masked]))->info();
+
+            // ✅ Redirección exacta que quieres
+            return redirect()->to(urlGen()->phoneVerification('users')); // => /auth/verify/users/phone
+        }
+
+        // Ya verificado o sin teléfono: entra normal
+        return $this->createNewSession($data);
+    }
+
+    // Credenciales inválidas
+    $message = data_get($data, 'message') ?? trans('auth.failed');
+    return redirect()->to($this->loginUrl)->withErrors(['error' => $message])->withInput();
+}
+}
